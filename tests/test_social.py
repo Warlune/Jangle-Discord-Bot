@@ -40,12 +40,13 @@ def test_party_game_commands_cover_each_mode() -> None:
     assert parse_social_command("social help").activity == "social"  # type: ignore[union-attr]
 
 
-def test_poll_story_award_and_party_commands_parse_naturally() -> None:
+def test_poll_dnd_award_and_party_commands_parse_naturally() -> None:
     poll = parse_social_command("start a poll raid or keys or battlegrounds")
     detailed_poll = parse_social_command(
         "start a vote What should we run tonight: raid, keys, or battlegrounds"
     )
-    story = parse_social_command("start story mode about a cursed raid portal")
+    dnd = parse_social_command("start DND campaign about a cursed raid portal")
+    fresh_dnd = parse_social_command("start a new D and D campaign about haunted mines")
     award = parse_social_command("start an award for most likely to stand in fire")
     party = parse_social_command("enable party mode for 20 minutes")
 
@@ -53,7 +54,18 @@ def test_poll_story_award_and_party_commands_parse_naturally() -> None:
     assert detailed_poll is not None
     assert detailed_poll.argument == "What should we run tonight"
     assert detailed_poll.options == ("raid", "keys", "battlegrounds")
-    assert story is not None and story.argument == "a cursed raid portal"
+    assert dnd is not None and (dnd.activity, dnd.action, dnd.argument) == (
+        "dnd",
+        "start",
+        "a cursed raid portal",
+    )
+    assert fresh_dnd is not None and fresh_dnd.action == "new"
+    assert parse_social_command("resume DND").action == "resume"  # type: ignore[union-attr]
+    assert parse_social_command("join DND").action == "join"  # type: ignore[union-attr]
+    assert parse_social_command("my stats").action == "stats"  # type: ignore[union-attr]
+    assert parse_social_command("party stats").action == "party_stats"  # type: ignore[union-attr]
+    assert parse_social_command("DND journal").action == "journal"  # type: ignore[union-attr]
+    assert parse_social_command("start story mode about a portal") is None
     assert award is not None and award.argument == "most likely to stand in fire"
     assert party is not None and party.duration_minutes == 20
     assert parse_social_command("party mode off").action == "stop"  # type: ignore[union-attr]

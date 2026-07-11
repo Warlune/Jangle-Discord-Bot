@@ -609,7 +609,9 @@ def create_bot(settings: Settings) -> DiscordAIBot:
             "Short conversation history exists only in RAM until reset or "
             "restart. Each user may explicitly keep up to five harmless 100-character notes in a "
             "plugin-owned local notepad keyed by Discord server and user ID; users can privately view "
-            "or delete their own notes with slash commands. "
+            "or delete their own notes with slash commands. DND mode separately keeps bounded local "
+            "character sheets and a campaign journal keyed by Discord IDs; only the active campaign "
+            "context is sent to the model for DM narration, and it never enters Warlune memory. "
             + (
                 "Test mode saves bot-directed text, accepted voice transcripts, answers, and timing to a "
                 "rotating local Jangle log. Ignored room conversation and raw audio are not saved. "

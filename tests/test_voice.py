@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -12,6 +13,7 @@ import numpy as np
 from discord.ext.voice_recv import router as voice_recv_router
 
 from discord_ai.social import GameState, QuizQuestion, SocialCommand
+from discord_ai.dnd import DndCampaignStore
 from discord_ai.user_notes import UserNoteStore
 from discord_ai.voice import (
     ENERGY_EASTER_EGG_RESPONSE,
@@ -86,12 +88,12 @@ def _social_test_session() -> tuple[VoiceSession, list[str], list[tuple[str, dic
             events.append((event, fields))
 
         async def answer(self, _key: str, prompt: str, **_kwargs: object) -> str:
-            if prompt.startswith("Begin a collaborative scenario"):
-                return "A cursed portal tears open above the inn."
-            if prompt.startswith("Conclude the collaborative story"):
-                return "The portal seals, leaving one suspiciously warm tankard behind."
-            if "story action" in prompt:
-                return "The floor answers with thunder and reveals a hidden stairway."
+            if "brand-new opening" in prompt:
+                return "A courier drops a locked satchel as muddy footsteps stop outside the inn."
+            if prompt.startswith("RESOLVED CHECK"):
+                return "The attempt reveals a hidden stairway and a fresh trail below."
+            if prompt.startswith("Conclude this mini campaign"):
+                return "The party returns the satchel and earns the courier's lasting trust."
             return "No. Question noted."
 
     class FakeChannel:
@@ -133,12 +135,17 @@ def _social_test_session() -> tuple[VoiceSession, list[str], list[tuple[str, dic
     session._dj_mode = False
     session._game_state = None
     session._poll_state = None
-    session._story_state = None
+    session._dnd_state = None
+    session._dnd_characters = {}
     session._award_state = None
     session._party_mode_enabled_at = 0.0
     session._party_mode_deadline = 0.0
     session._party_last_reaction_at = 0.0
     session._party_mode_enabled_by = 0
+    session._test_tempdir = tempfile.TemporaryDirectory()
+    session.dnd_store = DndCampaignStore(
+        Path(session._test_tempdir.name) / "dnd-campaigns.json"
+    )
     return session, messages, events
 
 
@@ -875,7 +882,8 @@ def test_wake_only_call_uses_short_acknowledgement_and_opens_one_reply() -> None
         session._dj_mode = False
         session._game_state = None
         session._poll_state = None
-        session._story_state = None
+        session._dnd_state = None
+        session._dnd_characters = {}
         session._award_state = None
 
         await session._handle_segment(PcmSegment(42, "Speaker", b"pcm", 0.8))
@@ -2731,28 +2739,37 @@ def test_voice_poll_accepts_wake_free_votes_and_posts_results() -> None:
     assert [event for event, _fields in events].count("voice_poll_vote") == 2
 
 
-def test_story_mode_enforces_speaker_id_turn_order() -> None:
+def test_dnd_mode_enforces_action_then_roll_and_speaker_turn_order() -> None:
     session, messages, _events = _social_test_session()
 
     async def exercise() -> None:
-        await session._handle_story_command(
-            SocialCommand("story", "start", argument="a cursed raid portal"),
+        await session._handle_dnd_command(
+            SocialCommand("dnd", "start", argument="a cursed raid portal"),
             PcmSegment(1, "Host", b"pcm", 1.0),
-            "Hey Jangle, start story mode about a cursed raid portal",
+            "Hey Jangle, start DND campaign about a cursed raid portal",
             50,
         )
-        assert session._activity_input_kind(1, "I charge through") == "story"
+        assert session._activity_input_kind(1, "I charge through") == "dnd"
         assert session._activity_input_kind(2, "I interrupt") is None
-        await session._handle_story_input(
+        await session._handle_dnd_input(
             "I charge through the portal",
             PcmSegment(1, "Host", b"pcm", 1.0),
             30,
         )
+        assert session._dnd_state is not None
+        assert session._dnd_state.pending_check is not None
+        assert session._dnd_current_character().user_id == 1  # type: ignore[union-attr]
+        await session._handle_dnd_input(
+            "roll",
+            PcmSegment(1, "Host", b"pcm", 1.0),
+            20,
+        )
 
     asyncio.run(exercise())
 
-    assert session._story_state is not None
-    assert session._story_current_participant().user_id == 2  # type: ignore[union-attr]
+    assert session._dnd_state is not None
+    assert session._dnd_state.pending_check is None
+    assert session._dnd_current_character().user_id == 2  # type: ignore[union-attr]
     assert any("Guest, what do you do?" in message for message in messages)
 
 

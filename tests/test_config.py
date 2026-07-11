@@ -62,6 +62,7 @@ def test_portable_lmstudio_defaults_hide_api_key(
     assert settings.personality_state_path.name == "personality-preferences.json"
     assert settings.ignored_speakers_state_path.name == "ignored-speakers.json"
     assert settings.user_notes_state_path.name == "user-notes.json"
+    assert settings.dnd_state_path.name == "dnd-campaigns.json"
     assert settings.voice_rms_threshold == 200
     assert settings.voice_preroll_ms == 240
     assert "local-api-secret" not in repr(settings)

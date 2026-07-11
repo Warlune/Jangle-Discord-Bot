@@ -435,6 +435,36 @@ def test_voice_lane_does_not_wait_behind_text() -> None:
     assert asyncio.run(exercise()) == "voice done"
 
 
+def test_answer_service_can_disable_search_for_in_world_game_actions() -> None:
+    captured: dict[str, object] = {}
+
+    class FakeGateway:
+        def will_search(self, *_args: object, **_kwargs: object) -> bool:
+            raise AssertionError("Search detection must be skipped when lookup is disabled")
+
+        def ask(
+            self,
+            _prompt: str,
+            _history: list[dict[str, str]],
+            **kwargs: object,
+        ) -> str:
+            captured.update(kwargs)
+            return "The room contains a hidden latch."
+
+    async def exercise() -> str:
+        settings = SimpleNamespace(history_turns=1, max_concurrent_requests=2)
+        service = AnswerService(settings, FakeGateway())
+        return await service.answer(
+            "dnd:1",
+            "I search the room",
+            voice=True,
+            allow_search=False,
+        )
+
+    assert asyncio.run(exercise()) == "The room contains a hidden latch."
+    assert captured["allow_search"] is False
+
+
 def test_voice_search_intent_covers_fresh_information() -> None:
     gateway = object.__new__(WarluneGateway)
     gateway.config = GuestWarluneConfig(

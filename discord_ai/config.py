@@ -152,6 +152,7 @@ class Settings:
     personality_state_path: Path
     ignored_speakers_state_path: Path
     user_notes_state_path: Path
+    dnd_state_path: Path
     music_volume: float
     music_max_seconds: int
     music_queue_max: int
@@ -295,6 +296,10 @@ class Settings:
             user_notes_state_path=_path(
                 "USER_NOTES_STATE_PATH",
                 PROJECT_ROOT / "data" / "user-notes.json",
+            ).resolve(),
+            dnd_state_path=_path(
+                "DND_STATE_PATH",
+                PROJECT_ROOT / "data" / "dnd-campaigns.json",
             ).resolve(),
             music_volume=_number("MUSIC_VOLUME", 0.45, 0.05, 1.0),
             music_max_seconds=_integer("MUSIC_MAX_MINUTES", 720, 1, 720) * 60,

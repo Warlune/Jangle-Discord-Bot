@@ -20,11 +20,11 @@ PARTY_AMBIENT_CHANCE = 0.35
 SOCIAL_HELP_TEXT = """**Jangle voice activities**
 Games: `start WoW trivia`, `start general trivia`, `start riddles`, `start Would You Rather`, `start Twenty Questions`, `hint`, `game score`, `next question`, `stop game`
 Polls: `start poll raid or keys or battlegrounds`, `poll results`, `end poll`, `cancel poll`
-Stories: `start story mode about <theme>`, `story status`, `end story`, `cancel story`
+DND: `start DND`, `start DND campaign about <theme>`, `start new DND campaign about <theme>`, `resume DND`, `join DND`, `DND status`, `my stats`, `party stats`, `DND journal`, `end DND`, `cancel DND`
 Awards: `start an award for <category>`, then say `I nominate <Discord name>`; use `award results`, `end nominations`, or `cancel award`
 Party Mode: administrator `enable party mode for 15 minutes`; anyone `party mode off`
 
-Say `Hey Jangle` before setup and control commands. Participant answers, votes, story turns, and nominations are wake-free while their activity is active."""
+Say `Hey Jangle` before setup and control commands. Participant answers, votes, DND turns and rolls, and nominations are wake-free while their activity is active."""
 
 
 @dataclass(frozen=True)
@@ -97,27 +97,6 @@ class PollState:
     )
     votes: dict[int, int] = field(default_factory=dict)
     voter_names: dict[int, str] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class StoryParticipant:
-    user_id: int
-    name: str
-
-
-@dataclass
-class StoryState:
-    theme: str
-    host_user_id: int
-    host_name: str
-    participants: tuple[StoryParticipant, ...]
-    started_at: float = field(default_factory=time.monotonic)
-    expires_at: float = field(
-        default_factory=lambda: time.monotonic() + SOCIAL_ACTIVITY_SECONDS
-    )
-    turn_index: int = 0
-    turns_completed: int = 0
-    max_turns: int = 6
 
 
 @dataclass
@@ -303,21 +282,33 @@ def parse_social_command(request: str) -> SocialCommand | None:
     if normalized in {"cancel poll", "stop poll", "cancel vote", "stop vote"}:
         return SocialCommand("poll", "stop")
 
-    story_start = re.fullmatch(
-        r"(?:start|begin)\s+(?:a\s+|the\s+)?(?:story|scenario)(?:\s+mode)?"
+    dnd_start = re.fullmatch(
+        r"(?:start|begin)\s+(?:a\s+|the\s+)?(?:(?P<new>new|fresh)\s+)?"
+        r"(?:d\s*(?:and|n|&)\s*d|dnd)(?:\s+(?:campaign|game|mode|adventure))?"
         r"(?:\s+(?:about|with|called|set\s+in)\s+)?(?P<theme>.*)",
         clean,
         flags=re.IGNORECASE,
     )
-    if story_start is not None:
-        theme = story_start.group("theme").strip() or "a chaotic fantasy tavern adventure"
-        return SocialCommand("story", "start", argument=theme[:120])
-    if normalized in {"stop story", "end story", "finish story", "stop scenario", "end scenario"}:
-        return SocialCommand("story", "finish")
-    if normalized in {"cancel story", "cancel scenario"}:
-        return SocialCommand("story", "stop")
-    if normalized in {"story status", "whose turn is it", "whose turn", "scenario status"}:
-        return SocialCommand("story", "status")
+    if dnd_start is not None:
+        theme = dnd_start.group("theme").strip() or "a fresh classic fantasy adventure"
+        action = "new" if dnd_start.group("new") else "start"
+        return SocialCommand("dnd", action, argument=theme[:160])
+    if normalized in {"resume dnd", "continue dnd", "resume d and d", "continue d and d"}:
+        return SocialCommand("dnd", "resume")
+    if normalized in {"join dnd", "join d and d", "join the dnd campaign", "join the d and d campaign"}:
+        return SocialCommand("dnd", "join")
+    if normalized in {"stop dnd", "end dnd", "finish dnd", "end d and d", "finish d and d"}:
+        return SocialCommand("dnd", "finish")
+    if normalized in {"cancel dnd", "cancel d and d"}:
+        return SocialCommand("dnd", "stop")
+    if normalized in {"dnd status", "d and d status", "whose turn is it", "whose turn"}:
+        return SocialCommand("dnd", "status")
+    if normalized in {"my stats", "my character", "character sheet", "my character sheet"}:
+        return SocialCommand("dnd", "stats")
+    if normalized in {"party stats", "party status", "party sheets", "show party"}:
+        return SocialCommand("dnd", "party_stats")
+    if normalized in {"dnd journal", "campaign journal", "show journal", "recap dnd", "dnd recap"}:
+        return SocialCommand("dnd", "journal")
 
     award_start = re.fullmatch(
         r"(?:start|begin|create)\s+(?:an?\s+|the\s+)?awards?"

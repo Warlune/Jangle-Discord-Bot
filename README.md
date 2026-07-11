@@ -16,7 +16,7 @@ Jangle does not require an OpenAI API key. Voice transcription runs locally with
 - Natural wake-word ownership, follow-up turns, and interruption handling
 - Focused Game Mode with WoW trivia, general trivia, riddles, Would You Rather, and Twenty Questions
 - Trivia buzz-ins while Jangle is still reading the question, without interrupting playback
-- Voice polls, collaborative stories, server awards, and timed Party Mode
+- Voice polls, persistent AI-run DND mini campaigns, server awards, and timed Party Mode
 - YouTube song and playlist queues with administrator controls and DJ Mode
 - Optional per-user notepads with strict size and sensitive-data filters
 - Optional public web context from a local SearXNG server
@@ -29,10 +29,11 @@ Jangle sends the configured model endpoint only:
 - the current request;
 - a short, in-memory conversation history for that Discord user;
 - relevant notes that the same user explicitly saved in Jangle;
+- the active DND party's bounded character sheets and recent campaign journal while DND mode is running;
 - public Discord context such as the current display name and voice-channel member names;
 - optional public search snippets when SearXNG is enabled.
 
-Jangle does not expose shell, filesystem, moderation, account, project, or browser tools to Discord users. Raw voice audio is not saved. Temporary conversation history disappears on restart or `/reset`.
+Jangle does not expose shell, filesystem, moderation, account, project, or browser tools to Discord users. Raw voice audio is not saved. Temporary conversation history disappears on restart or `/reset`. DND character sheets and a bounded campaign journal persist locally so a party can resume after a restart.
 
 When Warlune is selected, every Discord request uses guest mode with empty profile and memory context, no attachments, no action tools, and Warlune run logging disabled. Jangle-owned notes and settings remain in this project under `data/`; they never enter Warlune's profile or memory database.
 
@@ -40,7 +41,7 @@ The following local files are ignored by git:
 
 - `.env` and `channels.env`;
 - logs and JSONL conversation records;
-- user notes, Discord IDs, voice choices, and personality state;
+- user notes, Discord IDs, voice choices, personality state, and DND campaign data;
 - downloaded model/tokenizer files and local databases;
 - cookies, keys, and certificates.
 
@@ -289,12 +290,24 @@ Setup and control phrases require `Hey Jangle`. Participant responses are wake-f
 - `Hey Jangle, next question`
 - `Hey Jangle, stop game`
 - `Hey Jangle, start poll raid or keys or battlegrounds`
-- `Hey Jangle, start story mode about <theme>`
+- `Hey Jangle, start DND`
+- `Hey Jangle, start DND campaign about <theme>`
+- `Hey Jangle, start new DND campaign about <theme>`
+- `Hey Jangle, resume DND`
+- `Hey Jangle, join DND`
+- `Hey Jangle, DND status`
+- `Hey Jangle, my stats`
+- `Hey Jangle, party stats`
+- `Hey Jangle, DND journal`
+- `Hey Jangle, end DND`
+- `Hey Jangle, cancel DND`
 - `Hey Jangle, start an award for <category>`
 - Administrator: `Hey Jangle, enable party mode for 15 minutes`
 - Everyone: `Hey Jangle, party mode off`
 
 Game Mode suppresses normal AI chat and unrelated controls until the game ends. Trivia players may answer while Jangle is reading; playback continues, and Discord audio onset determines the fastest correct answer. Each player gets one answer per attempt. If nobody is correct, Jangle repeats the same question once before revealing the answer and advancing.
+
+DND Mode also suppresses normal chat and unrelated controls. Discord display names become character names, while immutable Discord user IDs preserve levels and stats after name changes. Jangle begins with a small easy problem, escalates through three scenes, and uses fresh AI narration grounded in the saved journal. On a character's turn, speak an action without the wake word; Jangle chooses a bounded check and DC, then that same player says `roll`. Dice, HP, XP, levels, and success or failure are calculated by code and cannot be changed by the model.
 
 ## Personalities And Voices
 
