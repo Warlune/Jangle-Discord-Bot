@@ -66,6 +66,9 @@ def test_poll_dnd_award_and_party_commands_parse_naturally() -> None:
     assert parse_social_command("party stats").action == "party_stats"  # type: ignore[union-attr]
     assert parse_social_command("DND journal").action == "journal"  # type: ignore[union-attr]
     assert parse_social_command("start story mode about a portal") is None
+    no_theme = parse_social_command("start DND campaign about")
+    assert no_theme is not None
+    assert no_theme.argument == "a fresh classic fantasy adventure"
     assert award is not None and award.argument == "most likely to stand in fire"
     assert party is not None and party.duration_minutes == 20
     assert parse_social_command("party mode off").action == "stop"  # type: ignore[union-attr]

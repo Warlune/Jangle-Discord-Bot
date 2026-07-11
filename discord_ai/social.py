@@ -290,7 +290,14 @@ def parse_social_command(request: str) -> SocialCommand | None:
         flags=re.IGNORECASE,
     )
     if dnd_start is not None:
-        theme = dnd_start.group("theme").strip() or "a fresh classic fantasy adventure"
+        theme = re.sub(
+            r"^(?:about|with|called|set\s+in)\b\s*",
+            "",
+            dnd_start.group("theme").strip(),
+            flags=re.IGNORECASE,
+        ).strip()
+        if normalize_social_text(theme) in {"", "about", "anything", "something"}:
+            theme = "a fresh classic fantasy adventure"
         action = "new" if dnd_start.group("new") else "start"
         return SocialCommand("dnd", action, argument=theme[:160])
     if normalized in {"resume dnd", "continue dnd", "resume d and d", "continue d and d"}:

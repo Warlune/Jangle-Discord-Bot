@@ -92,6 +92,8 @@ def _social_test_session() -> tuple[VoiceSession, list[str], list[tuple[str, dic
                 return "A courier drops a locked satchel as muddy footsteps stop outside the inn."
             if prompt.startswith("RESOLVED CHECK"):
                 return "The attempt reveals a hidden stairway and a fresh trail below."
+            if prompt.startswith("NO-ROLL ACTION"):
+                return "Host shrugs, and the unresolved situation remains in front of the party."
             if prompt.startswith("Conclude this mini campaign"):
                 return "The party returns the satchel and earns the courier's lasting trust."
             return "No. Question noted."
@@ -137,6 +139,8 @@ def _social_test_session() -> tuple[VoiceSession, list[str], list[tuple[str, dic
     session._poll_state = None
     session._dnd_state = None
     session._dnd_characters = {}
+    session._dnd_accepting_input = False
+    session._dnd_turn_opened_at = 0.0
     session._award_state = None
     session._party_mode_enabled_at = 0.0
     session._party_mode_deadline = 0.0
@@ -2771,6 +2775,69 @@ def test_dnd_mode_enforces_action_then_roll_and_speaker_turn_order() -> None:
     assert session._dnd_state.pending_check is None
     assert session._dnd_current_character().user_id == 2  # type: ignore[union-attr]
     assert any("Guest, what do you do?" in message for message in messages)
+
+
+def test_dnd_ignores_laughter_interjections_and_audio_from_the_previous_turn() -> None:
+    session, _messages, events = _social_test_session()
+
+    async def exercise() -> None:
+        await session._handle_dnd_command(
+            SocialCommand("dnd", "start", argument="old ruins"),
+            PcmSegment(1, "Host", b"pcm", 1.0),
+            "Hey Jangle, start DND",
+            30,
+        )
+        opened_at = session._dnd_turn_opened_at
+        await session._handle_dnd_input(
+            "Haha",
+            PcmSegment(1, "Host", b"pcm", 0.5, started_at=opened_at + 0.1),
+            10,
+        )
+        await session._handle_dnd_input(
+            "Oh",
+            PcmSegment(1, "Host", b"pcm", 0.5, started_at=opened_at + 0.2),
+            10,
+        )
+        await session._handle_dnd_input(
+            "I attack the guard",
+            PcmSegment(1, "Host", b"pcm", 0.8, started_at=opened_at - 0.2),
+            15,
+        )
+
+    asyncio.run(exercise())
+
+    assert session._dnd_state is not None
+    assert session._dnd_state.turns_completed == 0
+    assert session._dnd_state.pending_check is None
+    event_names = [event for event, _fields in events]
+    assert event_names.count("voice_dnd_ambient_input_ignored") == 2
+    assert "voice_dnd_stale_input_ignored" in event_names
+
+
+def test_dnd_resolves_simple_roleplay_without_a_roll() -> None:
+    session, messages, events = _social_test_session()
+
+    async def exercise() -> None:
+        await session._handle_dnd_command(
+            SocialCommand("dnd", "start", argument="old ruins"),
+            PcmSegment(1, "Host", b"pcm", 1.0),
+            "Hey Jangle, start DND",
+            30,
+        )
+        await session._handle_dnd_input(
+            "Shrug",
+            PcmSegment(1, "Host", b"pcm", 0.7),
+            12,
+        )
+
+    asyncio.run(exercise())
+
+    assert session._dnd_state is not None
+    assert session._dnd_state.turns_completed == 1
+    assert session._dnd_state.pending_check is None
+    assert session._dnd_current_character().user_id == 2  # type: ignore[union-attr]
+    assert any("unresolved situation remains" in message for message in messages)
+    assert any(event == "voice_dnd_action_resolved" for event, _fields in events)
 
 
 def test_jangle_awards_resolve_discord_names_and_announce_tie() -> None:
