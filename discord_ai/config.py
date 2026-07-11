@@ -136,6 +136,7 @@ class Settings:
     voice_min_ms: int
     voice_max_seconds: int
     voice_rms_threshold: int
+    voice_preroll_ms: int
     voice_barge_in_frames: int
     voice_followup_seconds: int
     voice_text_echo: bool
@@ -266,7 +267,8 @@ class Settings:
             voice_silence_ms=_integer("VOICE_SILENCE_MS", 650, 300, 3000),
             voice_min_ms=_integer("VOICE_MIN_MS", 250, 100, 3000),
             voice_max_seconds=_integer("VOICE_MAX_SECONDS", 25, 3, 60),
-            voice_rms_threshold=_integer("VOICE_RMS_THRESHOLD", 300, 50, 5000),
+            voice_rms_threshold=_integer("VOICE_RMS_THRESHOLD", 200, 50, 5000),
+            voice_preroll_ms=_integer("VOICE_PREROLL_MS", 240, 0, 1000),
             voice_barge_in_frames=_integer("VOICE_BARGE_IN_FRAMES", 15, 3, 50),
             voice_followup_seconds=_integer("VOICE_FOLLOWUP_SECONDS", 25, 5, 90),
             voice_text_echo=_boolean("VOICE_TEXT_ECHO", False),

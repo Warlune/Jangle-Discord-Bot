@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Callable, Iterator
 from difflib import SequenceMatcher
 import json
@@ -73,6 +74,7 @@ EDGE_TTS_TIMEOUT_SECONDS = 3.0
 POCKET_TTS_SAMPLE_RATE = 24_000
 POCKET_TTS_READY_TIMEOUT_SECONDS = 12.0
 DISCORD_PCM_FRAME_BYTES = 3_840
+DEFAULT_VOICE_PREROLL_MS = 240
 POCKET_TTS_ASSET_ROOT = Path(__file__).resolve().parents[1] / "data" / "pocket-tts"
 _DAVE_PATCH_LOCK = threading.Lock()
 _DAVE_WARNING_LOCK = threading.Lock()
@@ -1623,6 +1625,7 @@ class _ActivePcm:
     started_at: float
     last_voice_at: float
     pcm: bytearray = field(default_factory=bytearray)
+    preroll_bytes: int = 0
     owner_barge_in: bool = False
     foreign_playback: bool = False
     blocked_playback: bool = False
@@ -1642,12 +1645,19 @@ class PcmSegmenter:
         minimum_ms: int,
         maximum_seconds: int,
         rms_threshold: int,
+        preroll_ms: int = DEFAULT_VOICE_PREROLL_MS,
     ) -> None:
         self.silence_seconds = silence_ms / 1000.0
         self.minimum_seconds = minimum_ms / 1000.0
         self.maximum_seconds = float(maximum_seconds)
         self.rms_threshold = rms_threshold
+        self.preroll_bytes = max(
+            0,
+            round(PCM_BYTES_PER_SECOND * preroll_ms / 1000),
+        )
         self._active: dict[int, _ActivePcm] = {}
+        self._preroll: dict[int, deque[bytes]] = {}
+        self._preroll_sizes: dict[int, int] = {}
         self._ready: list[PcmSegment] = []
         self._lock = threading.Lock()
 
@@ -1675,14 +1685,19 @@ class PcmSegmenter:
                 active = None
             if active is None:
                 if not voiced:
+                    self._remember_preroll_locked(user_id, pcm)
                     return
+                preroll = b"".join(self._preroll.pop(user_id, ()))
+                self._preroll_sizes.pop(user_id, None)
                 active = _ActivePcm(
                     user_id,
                     user_name[:100],
                     timestamp,
                     timestamp,
+                    preroll_bytes=len(preroll),
                     game_window_token=game_window_token,
                 )
+                active.pcm.extend(preroll)
                 self._active[user_id] = active
             active.pcm.extend(pcm)
             active.owner_barge_in = active.owner_barge_in or owner_barge_in
@@ -1697,7 +1712,8 @@ class PcmSegmenter:
                 active.game_window_changed = True
             if voiced:
                 active.last_voice_at = timestamp
-            if len(active.pcm) / PCM_BYTES_PER_SECOND >= self.maximum_seconds:
+            captured_bytes = max(0, len(active.pcm) - active.preroll_bytes)
+            if captured_bytes / PCM_BYTES_PER_SECOND >= self.maximum_seconds:
                 self._finish_locked(user_id)
 
     def pop_ready(self, *, now: float | None = None) -> list[PcmSegment]:
@@ -1721,13 +1737,25 @@ class PcmSegmenter:
     def discard_user(self, user_id: int) -> None:
         with self._lock:
             self._active.pop(user_id, None)
+            self._preroll.pop(user_id, None)
+            self._preroll_sizes.pop(user_id, None)
             self._ready = [segment for segment in self._ready if segment.user_id != user_id]
+
+    def _remember_preroll_locked(self, user_id: int, pcm: bytes) -> None:
+        if self.preroll_bytes <= 0:
+            return
+        chunks = self._preroll.setdefault(user_id, deque())
+        chunks.append(pcm)
+        size = self._preroll_sizes.get(user_id, 0) + len(pcm)
+        while chunks and size > self.preroll_bytes:
+            size -= len(chunks.popleft())
+        self._preroll_sizes[user_id] = size
 
     def _finish_locked(self, user_id: int) -> None:
         active = self._active.pop(user_id, None)
         if active is None:
             return
-        duration = len(active.pcm) / PCM_BYTES_PER_SECOND
+        duration = max(0, len(active.pcm) - active.preroll_bytes) / PCM_BYTES_PER_SECOND
         if duration < self.minimum_seconds:
             return
         self._ready.append(
@@ -1760,15 +1788,38 @@ class PcmSegmenter:
 
 
 def extract_wake_request(transcript: str, wake_words: tuple[str, ...]) -> str | None:
-    normalized = transcript.casefold()
-    first_match: re.Match[str] | None = None
+    wake_span: tuple[int, int] | None = None
     for wake_word in wake_words:
-        match = re.search(rf"(?<!\w){re.escape(wake_word)}(?!\w)", normalized)
-        if match is not None and (first_match is None or match.start() < first_match.start()):
-            first_match = match
-    if first_match is None:
+        match = re.search(
+            rf"(?<!\w){re.escape(wake_word)}(?!\w)",
+            transcript,
+            flags=re.IGNORECASE,
+        )
+        if match is not None and (wake_span is None or match.start() < wake_span[0]):
+            wake_span = match.span()
+    greeting_match = re.search(
+        r"\b(?:hey|hi|hello|yo|ok|okay)\b[\s,.:;!?-]*"
+        r"(?P<candidate>[a-z][a-z'-]{2,10})",
+        transcript,
+        flags=re.IGNORECASE,
+    )
+    if greeting_match is not None:
+        candidate = greeting_match.group("candidate").casefold()
+        similarity = max(
+            (
+                SequenceMatcher(None, candidate, wake_word.casefold()).ratio()
+                for wake_word in wake_words
+            ),
+            default=0.0,
+        )
+        if similarity >= 0.72 or candidate == "django":
+            candidate_span = greeting_match.span("candidate")
+            if wake_span is None or candidate_span[0] < wake_span[0]:
+                wake_span = candidate_span
+    if wake_span is None:
         return None
-    before = transcript[: first_match.start()].strip(" ,.:;!?-")
+    wake_start, wake_end = wake_span
+    before = transcript[:wake_start].strip(" ,.:;!?-")
     if re.search(r"\b(?:hey|hi|hello|yo|ok|okay)\s*$", before, flags=re.IGNORECASE):
         before = ""
     else:
@@ -1778,7 +1829,7 @@ def extract_wake_request(transcript: str, wake_words: tuple[str, ...]) -> str | 
             before,
             flags=re.IGNORECASE,
         ).strip(" ,.:;!?-")
-    after = transcript[first_match.end() :].strip(" ,.:;!?-")
+    after = transcript[wake_end:].strip(" ,.:;!?-")
     request = " ".join(part for part in (before, after) if part).strip()
     return request or "Say a brief, friendly hello."
 
@@ -1894,13 +1945,27 @@ class LocalWhisper:
 
     def _run_transcription(self, audio: np.ndarray[Any, Any]) -> str:
         model = self._ensure_model()
+        wake_words = tuple(getattr(self.settings, "voice_wake_words", ()))
+        hotwords = ", ".join(
+            dict.fromkeys(
+                phrase
+                for wake_word in wake_words
+                for phrase in (wake_word.title(), f"Hey {wake_word.title()}")
+            )
+        )
         segments, _ = model.transcribe(
             audio,
             beam_size=1,
             language=self.settings.whisper_language,
             temperature=0.0,
             vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 200},
+            vad_parameters={
+                "threshold": 0.35,
+                "min_speech_duration_ms": 80,
+                "min_silence_duration_ms": 200,
+                "speech_pad_ms": DEFAULT_VOICE_PREROLL_MS,
+            },
+            hotwords=hotwords or None,
             condition_on_previous_text=False,
             without_timestamps=True,
         )
@@ -2369,6 +2434,7 @@ class VoiceSession:
             minimum_ms=settings.voice_min_ms,
             maximum_seconds=settings.voice_max_seconds,
             rms_threshold=settings.voice_rms_threshold,
+            preroll_ms=settings.voice_preroll_ms,
         )
         self._personality_key = personality_preferences.get(voice_client.guild.id)
         self._ignored_user_ids = set(ignored_speakers.get(voice_client.guild.id))
@@ -3013,6 +3079,55 @@ class VoiceSession:
             )
             return True
 
+        dj_mode = parse_dj_mode_command(request)
+        if dj_mode is not None:
+            await self._handle_dj_mode(dj_mode, segment, transcript, transcription_ms)
+            return True
+
+        if social_command is not None:
+            await self._handle_social_command(
+                social_command,
+                segment,
+                transcript,
+                transcription_ms,
+            )
+            return True
+
+        if not getattr(self, "_dj_mode", False) and (
+            pending_control in {"music_query", "playlist_query"}
+            or is_admin_stop_command(request)
+            or is_admin_clear_queue_command(request)
+            or is_show_queue_command(request)
+            or parse_music_pause_command(request) is not None
+            or parse_music_volume_command(request) is not None
+            or parse_music_navigation(request) is not None
+            or parse_playlist_command(request) is not None
+            or parse_add_to_queue_query(request) is not None
+            or parse_music_query(request) is not None
+        ):
+            getattr(self, "_music_query_deadlines", {}).pop(segment.user_id, None)
+            getattr(self, "_music_query_queue_only", {}).pop(segment.user_id, None)
+            getattr(self, "_playlist_query_deadlines", {}).pop(segment.user_id, None)
+            self.answer_service.record_event(
+                "voice_music_requires_dj_mode",
+                guild_id=self.voice_client.guild.id,
+                channel_id=getattr(self.voice_client.channel, "id", 0),
+                user_id=segment.user_id,
+                user_name=segment.user_name,
+                transcript=transcript,
+                transcription_ms=transcription_ms,
+            )
+            await self._control_response(
+                (
+                    "DJ mode is off. Say Hey Jangle, enable DJ mode before using music commands."
+                    if self._speaker_is_admin(segment.user_id)
+                    else "DJ mode is off. Ask a server administrator to enable it before using "
+                    "music commands."
+                ),
+                segment.user_id,
+            )
+            return True
+
         if is_admin_stop_command(request):
             getattr(self, "_voice_choice_deadlines", {}).pop(segment.user_id, None)
             getattr(self, "_personality_choice_deadlines", {}).pop(
@@ -3033,20 +3148,6 @@ class VoiceSession:
 
         if is_show_queue_command(request):
             await self._handle_show_queue(segment, transcript, transcription_ms)
-            return True
-
-        dj_mode = parse_dj_mode_command(request)
-        if dj_mode is not None:
-            await self._handle_dj_mode(dj_mode, segment, transcript, transcription_ms)
-            return True
-
-        if social_command is not None:
-            await self._handle_social_command(
-                social_command,
-                segment,
-                transcript,
-                transcription_ms,
-            )
             return True
 
         pause_command = parse_music_pause_command(request)
@@ -3870,6 +3971,9 @@ class VoiceSession:
                 )
                 return
 
+        music_stopped = False
+        if not enabled:
+            music_stopped = self._stop_music()
         self._dj_mode = enabled
         self._followups.clear()
         self._voice_choice_deadlines.clear()
@@ -3888,12 +3992,18 @@ class VoiceSession:
             user_name=segment.user_name,
             transcript=transcript,
             enabled=enabled,
+            music_stopped=music_stopped,
             transcription_ms=transcription_ms,
         )
         await self._control_response(
             "DJ mode enabled. I will only accept music commands."
             if enabled
-            else "DJ mode disabled. Questions are enabled again.",
+            else (
+                "DJ mode disabled. Music stopped, the queue is clear, and questions are "
+                "enabled again."
+                if music_stopped
+                else "DJ mode disabled. Questions are enabled again."
+            ),
             segment.user_id,
         )
 

@@ -231,10 +231,15 @@ VOICE_WAKE_WORDS=jangle,jengel,jingle,jangel
 VOICE_SILENCE_MS=650
 VOICE_MIN_MS=250
 VOICE_MAX_SECONDS=25
-VOICE_RMS_THRESHOLD=300
+VOICE_RMS_THRESHOLD=200
+VOICE_PREROLL_MS=240
 VOICE_BARGE_IN_FRAMES=15
 VOICE_FOLLOWUP_SECONDS=25
 ```
+
+`VOICE_RMS_THRESHOLD` controls microphone sensitivity; lower values hear quieter microphones but
+may transcribe more background noise. `VOICE_PREROLL_MS` preserves the beginning of short wake-word
+calls without delaying the response.
 
 ## Running Jangle
 
@@ -312,16 +317,18 @@ Voice controls are administrator-only:
 
 FFmpeg and yt-dlp handle YouTube playback. Live streams are excluded.
 
-- Public: natural requests containing a song and `queue`
-- Public: `Hey Jangle, show queue`
+- Administrator: `Hey Jangle, enable DJ mode`
+- Public while DJ Mode is active: natural requests containing a song and `queue`
+- Public while DJ Mode is active: `Hey Jangle, show queue`
 - Administrator: `Hey Jangle, play <song>`
 - Administrator: `Hey Jangle, find playlist <name>`
 - Administrator: `Hey Jangle, next`, `previous`, `pause`, or `resume`
 - Administrator: `Hey Jangle, volume up` or `volume down`
 - Administrator: `Hey Jangle, clear queue` or `stop`
-- Administrator: `Hey Jangle, enable DJ mode` or `DJ mode off`
+- Administrator: `Hey Jangle, DJ mode off`
 
-DJ Mode ignores AI questions and accepts only music controls. Text chat remains available.
+Music controls are locked while DJ Mode is off. DJ Mode ignores AI questions and accepts only
+music controls; turning it off stops active music and clears the queue. Text chat remains available.
 
 ## Local Data And Test Logs
 

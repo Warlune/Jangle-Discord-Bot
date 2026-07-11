@@ -174,6 +174,26 @@ def test_segmenter_ignores_short_noise() -> None:
     assert segmenter.pop_ready(now=1.0) == []
 
 
+def test_segmenter_prepends_quiet_audio_without_inflating_spoken_duration() -> None:
+    segmenter = PcmSegmenter(
+        silence_ms=100,
+        minimum_ms=10,
+        maximum_seconds=10,
+        rms_threshold=300,
+        preroll_ms=40,
+    )
+    quiet = _voiced_packet(100)
+    segmenter.push(42, "Speaker", quiet, now=0.0)
+    segmenter.push(42, "Speaker", quiet, now=0.02)
+    segmenter.push(42, "Speaker", _voiced_packet(), now=0.04)
+
+    segments = segmenter.pop_ready(now=0.2)
+
+    assert len(segments) == 1
+    assert segments[0].pcm.startswith(quiet + quiet)
+    assert 0.019 <= segments[0].duration_seconds <= 0.021
+
+
 def test_segmenter_preserves_trivia_buzz_in_timing_through_silence() -> None:
     segmenter = PcmSegmenter(
         silence_ms=100,
@@ -231,7 +251,10 @@ def test_local_whisper_uses_single_pass_low_latency_decoding() -> None:
             return [SimpleNamespace(text=" hello ")], object()
 
     whisper = object.__new__(LocalWhisper)
-    whisper.settings = SimpleNamespace(whisper_language="en")
+    whisper.settings = SimpleNamespace(
+        whisper_language="en",
+        voice_wake_words=("jangle", "jingle"),
+    )
     whisper._ensure_model = lambda: FakeModel()  # type: ignore[method-assign]
 
     result = whisper._run_transcription(np.zeros(16000, dtype=np.float32))
@@ -241,6 +264,13 @@ def test_local_whisper_uses_single_pass_low_latency_decoding() -> None:
     assert captured["temperature"] == 0.0
     assert captured["condition_on_previous_text"] is False
     assert captured["without_timestamps"] is True
+    assert captured["hotwords"] == "Jangle, Hey Jangle, Jingle, Hey Jingle"
+    assert captured["vad_parameters"] == {
+        "threshold": 0.35,
+        "min_speech_duration_ms": 80,
+        "min_silence_duration_ms": 200,
+        "speech_pad_ms": 240,
+    }
 
 
 def test_audio_pacing_resets_instead_of_bursting_after_long_stall() -> None:
@@ -461,6 +491,10 @@ def test_wake_word_extracts_only_the_request() -> None:
         == "Can you explain that"
     )
     assert extract_wake_request("No! Hey Jangle, stop!", ("jangle",)) == "stop"
+    assert extract_wake_request("Hey Django, are you there?", ("jangle",)) == "are you there"
+    assert extract_wake_request("Hey Jungle, listen up", ("jangle",)) == "listen up"
+    assert extract_wake_request("Hey Angela, listen up", ("jangle",)) is None
+    assert extract_wake_request("Django is a web framework", ("jangle",)) is None
     assert extract_wake_request("This is ordinary conversation", ("jangle",)) is None
 
 
@@ -1755,6 +1789,97 @@ def test_barge_in_preserves_current_and_queued_music() -> None:
     assert len(queued) == 1 and isinstance(queued[0], MusicItem)
 
 
+def test_music_commands_require_dj_mode_before_searching_or_queueing() -> None:
+    async def exercise() -> tuple[bool, list[str], list[str]]:
+        session, _messages, events = _social_test_session()
+        session.tts = object()
+        session.playback_queue = asyncio.Queue()
+        session._music_query_deadlines = {}
+        session._music_query_queue_only = {}
+        session._playlist_query_deadlines = {}
+        segment = PcmSegment(1, "Host", b"pcm", 1.0)
+
+        handled = await session._handle_control_request(
+            "play Africa by Toto",
+            segment,
+            pending_control=None,
+            transcript="Hey Jangle, play Africa by Toto",
+            transcription_ms=50,
+        )
+        spoken = [
+            item.text
+            for item in session.playback_queue._queue
+            if isinstance(item, SpokenItem)
+        ]
+        return handled, [event for event, _fields in events], spoken
+
+    handled, events, spoken = asyncio.run(exercise())
+
+    assert handled is True
+    assert events == ["voice_music_requires_dj_mode"]
+    assert spoken == [
+        "DJ mode is off. Say Hey Jangle, enable DJ mode before using music commands."
+    ]
+
+
+def test_disabling_dj_mode_stops_music_and_clears_the_queue() -> None:
+    async def exercise() -> tuple[VoiceSession, int, list[tuple[str, dict[str, object]]]]:
+        session, _messages, events = _social_test_session()
+        channel = session.voice_client.channel
+
+        class FakeVoiceClient:
+            guild = SimpleNamespace(id=7, owner_id=1)
+
+            def __init__(self) -> None:
+                self.channel = channel
+                self.playing = True
+                self.stop_count = 0
+
+            def is_playing(self) -> bool:
+                return self.playing
+
+            def is_paused(self) -> bool:
+                return False
+
+            def stop_playing(self) -> None:
+                self.playing = False
+                self.stop_count += 1
+
+        track = YouTubeTrack("query", "Song", "https://youtube.test/watch", "stream", 180)
+        session.voice_client = FakeVoiceClient()
+        session.playback_queue = asyncio.Queue()
+        session._current_music_item = MusicItem(track, 1, "Host")
+        session._music_item_count = 2
+        session._music_generation = 0
+        session._music_queue_revision = 0
+        session._music_history = [track]
+        session._music_history_cursor = 0
+        session._music_query_deadlines = {}
+        session._music_query_queue_only = {}
+        session._playlist_query_deadlines = {}
+        session._followups = {}
+        session._voice_choice_deadlines = {}
+        session._personality_choice_deadlines = {}
+        session._dj_mode = True
+        await session.playback_queue.put(MusicItem(track, 2, "Guest"))
+
+        await session._handle_dj_mode(
+            False,
+            PcmSegment(1, "Host", b"pcm", 1.0),
+            "Hey Jangle, DJ mode off",
+            50,
+        )
+        return session, session.voice_client.stop_count, events
+
+    session, stop_count, events = asyncio.run(exercise())
+
+    assert session._dj_mode is False
+    assert stop_count == 1
+    assert all(not isinstance(item, MusicItem) for item in session.playback_queue._queue)
+    assert events[-1][0] == "voice_dj_mode_changed"
+    assert events[-1][1]["music_stopped"] is True
+
+
 def test_play_voice_command_searches_youtube_and_bypasses_model() -> None:
     captured: dict[str, object] = {}
     events: list[str] = []
@@ -1818,6 +1943,7 @@ def test_play_voice_command_searches_youtube_and_bypasses_model() -> None:
         session._music_lookup_lock = asyncio.Lock()
         session._current_music_item = None
         session._recent_exchange = None
+        session._dj_mode = True
 
         await session._handle_segment(PcmSegment(42, "Speaker", b"pcm", 1.0))
         return list(session.playback_queue._queue)
