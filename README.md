@@ -323,7 +323,7 @@ FFmpeg and yt-dlp handle YouTube playback. Live streams are excluded.
 - Administrator: `Hey Jangle, play <song>`
 - Administrator: `Hey Jangle, find playlist <name>`
 - Administrator: `Hey Jangle, next`, `previous`, `pause`, or `resume`
-- Administrator: `Hey Jangle, volume up` or `volume down`
+- Administrator: `Hey Jangle, volume up`, `volume down`, or `set volume <0-100>`
 - Administrator: `Hey Jangle, clear queue` or `stop`
 - Administrator: `Hey Jangle, DJ mode off`
 

@@ -771,6 +771,74 @@ def parse_music_pause_command(request: str) -> str | None:
     return None
 
 
+_VOLUME_ONES = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+}
+_VOLUME_TENS = {
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fifty": 50,
+    "sixty": 60,
+    "seventy": 70,
+    "eighty": 80,
+    "ninety": 90,
+}
+
+
+def _parse_spoken_percentage(value: str) -> int | None:
+    clean = " ".join(value.casefold().replace("-", " ").split())
+    if clean.isdigit():
+        return int(clean)
+    if clean in {"a hundred", "one hundred"}:
+        return 100
+    if clean in _VOLUME_ONES:
+        return _VOLUME_ONES[clean]
+    parts = clean.split()
+    if not parts or parts[0] not in _VOLUME_TENS:
+        return None
+    if len(parts) == 1:
+        return _VOLUME_TENS[parts[0]]
+    if len(parts) == 2 and parts[1] in _VOLUME_ONES and _VOLUME_ONES[parts[1]] < 10:
+        return _VOLUME_TENS[parts[0]] + _VOLUME_ONES[parts[1]]
+    return None
+
+
+def parse_music_volume_level(request: str) -> int | None:
+    normalized = " ".join(
+        re.sub(r"[^a-zA-Z0-9%'-]+", " ", request).casefold().split()
+    )
+    normalized = re.sub(r"^(?:please\s+|can\s+you\s+)", "", normalized).strip()
+    normalized = re.sub(r"\s+please$", "", normalized).strip()
+    match = re.fullmatch(
+        r"(?:(?:set|change)\s+)?(?:the\s+)?(?:music\s+)?volume"
+        r"(?:\s+(?:to|at))?\s+(?P<value>.+?)(?:\s+percent|%)?",
+        normalized,
+    )
+    if match is None:
+        return None
+    return _parse_spoken_percentage(match.group("value").strip())
+
+
 def parse_music_volume_command(request: str) -> int | None:
     normalized = " ".join(re.sub(r"[^a-zA-Z]+", " ", request).casefold().split())
     normalized = re.sub(r"^(?:please\s+|can\s+you\s+)", "", normalized).strip()
@@ -1787,6 +1855,45 @@ class PcmSegmenter:
         return int(math.sqrt(float(np.mean(values * values))))
 
 
+def _wake_candidate_matches(candidate: str, wake_words: tuple[str, ...]) -> bool:
+    clean = candidate.casefold().strip(" '-")
+    if not clean:
+        return False
+    similarity = max(
+        (
+            SequenceMatcher(None, clean, wake_word.casefold()).ratio()
+            for wake_word in wake_words
+        ),
+        default=0.0,
+    )
+    return similarity >= 0.72 or clean == "django"
+
+
+def is_impossible_repeated_wake_transcript(
+    transcript: str,
+    wake_words: tuple[str, ...],
+    audio_seconds: float,
+) -> bool:
+    clauses = [
+        clause.strip()
+        for clause in re.split(r"[,.;!?]+", transcript)
+        if clause.strip()
+    ]
+    if len(clauses) < 4:
+        return False
+    for clause in clauses:
+        candidate = re.sub(
+            r"^(?:hey|hi|hello|yo|ok|okay)\s+",
+            "",
+            clause,
+            flags=re.IGNORECASE,
+        ).strip()
+        if len(candidate.split()) != 1 or not _wake_candidate_matches(candidate, wake_words):
+            return False
+    maximum_plausible_calls = max(3, math.ceil(max(0.0, audio_seconds) * 3.0))
+    return len(clauses) > maximum_plausible_calls
+
+
 def extract_wake_request(transcript: str, wake_words: tuple[str, ...]) -> str | None:
     wake_span: tuple[int, int] | None = None
     for wake_word in wake_words:
@@ -1805,14 +1912,7 @@ def extract_wake_request(transcript: str, wake_words: tuple[str, ...]) -> str | 
     )
     if greeting_match is not None:
         candidate = greeting_match.group("candidate").casefold()
-        similarity = max(
-            (
-                SequenceMatcher(None, candidate, wake_word.casefold()).ratio()
-                for wake_word in wake_words
-            ),
-            default=0.0,
-        )
-        if similarity >= 0.72 or candidate == "django":
+        if _wake_candidate_matches(candidate, wake_words):
             candidate_span = greeting_match.span("candidate")
             if wake_span is None or candidate_span[0] < wake_span[0]:
                 wake_span = candidate_span
@@ -1831,7 +1931,7 @@ def extract_wake_request(transcript: str, wake_words: tuple[str, ...]) -> str | 
         ).strip(" ,.:;!?-")
     after = transcript[wake_end:].strip(" ,.:;!?-")
     request = " ".join(part for part in (before, after) if part).strip()
-    return request or "Say a brief, friendly hello."
+    return request
 
 
 def is_nonverbal_interruption(transcript: str) -> bool:
@@ -1945,14 +2045,6 @@ class LocalWhisper:
 
     def _run_transcription(self, audio: np.ndarray[Any, Any]) -> str:
         model = self._ensure_model()
-        wake_words = tuple(getattr(self.settings, "voice_wake_words", ()))
-        hotwords = ", ".join(
-            dict.fromkeys(
-                phrase
-                for wake_word in wake_words
-                for phrase in (wake_word.title(), f"Hey {wake_word.title()}")
-            )
-        )
         segments, _ = model.transcribe(
             audio,
             beam_size=1,
@@ -1965,11 +2057,23 @@ class LocalWhisper:
                 "min_silence_duration_ms": 200,
                 "speech_pad_ms": DEFAULT_VOICE_PREROLL_MS,
             },
-            hotwords=hotwords or None,
             condition_on_previous_text=False,
             without_timestamps=True,
         )
-        return " ".join(part.text.strip() for part in segments if part.text.strip()).strip()
+        transcript = " ".join(
+            part.text.strip() for part in segments if part.text.strip()
+        ).strip()
+        if is_impossible_repeated_wake_transcript(
+            transcript,
+            tuple(getattr(self.settings, "voice_wake_words", ())),
+            audio.size / 16_000,
+        ):
+            LOGGER.warning(
+                "Discarded impossible repeated wake transcript for %.0f ms of audio",
+                audio.size / 16,
+            )
+            return ""
+        return transcript
 
 
 class PocketTtsEngine:
@@ -2777,12 +2881,35 @@ class VoiceSession:
                     or getattr(self, "_current_spoken_item").interruptible
                 ):
                     self._interrupt_playback(segment.user_id, "wake_word_takeover")
-            if self.text_echo:
+            transcription_ms = round((time.perf_counter() - transcription_started) * 1000)
+            if (
+                request == ""
+                and pending_control is None
+                and social_input_kind is None
+                and self._active_activity_name() is None
+                and not getattr(self, "_dj_mode", False)
+            ):
+                self._followups[segment.user_id] = FollowupState(
+                    time.monotonic() + self.settings.voice_followup_seconds,
+                    "clarification",
+                    1,
+                )
+                self.answer_service.record_event(
+                    "voice_wake_acknowledged",
+                    guild_id=guild.id,
+                    channel_id=channel_id,
+                    user_id=segment.user_id,
+                    user_name=segment.user_name,
+                    transcript=transcript,
+                    transcription_ms=transcription_ms,
+                )
+                await self._control_response("Yeah?", segment.user_id)
+                return
+            if self.text_echo and request:
                 await self.companion_channel.send(
                     f"**{segment.user_name}:** {request[:1700]}",
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
-            transcription_ms = round((time.perf_counter() - transcription_started) * 1000)
             if social_input_kind is None:
                 if await self._handle_control_request(
                     request,
@@ -3035,6 +3162,7 @@ class VoiceSession:
                 or is_show_queue_command(request)
                 or parse_dj_mode_command(request) is not None
                 or parse_music_pause_command(request) is not None
+                or parse_music_volume_level(request) is not None
                 or parse_music_volume_command(request) is not None
                 or parse_music_navigation(request) is not None
                 or parse_playlist_command(request) is not None
@@ -3099,6 +3227,7 @@ class VoiceSession:
             or is_admin_clear_queue_command(request)
             or is_show_queue_command(request)
             or parse_music_pause_command(request) is not None
+            or parse_music_volume_level(request) is not None
             or parse_music_volume_command(request) is not None
             or parse_music_navigation(request) is not None
             or parse_playlist_command(request) is not None
@@ -3154,6 +3283,16 @@ class VoiceSession:
         if pause_command is not None:
             await self._handle_music_pause(
                 pause_command,
+                segment,
+                transcript,
+                transcription_ms,
+            )
+            return True
+
+        volume_level = parse_music_volume_level(request)
+        if volume_level is not None:
+            await self._handle_music_volume_level(
+                volume_level,
                 segment,
                 transcript,
                 transcription_ms,
@@ -4141,7 +4280,6 @@ class VoiceSession:
         transcript: str,
         transcription_ms: int,
     ) -> None:
-        guild = self.voice_client.guild
         if not self._speaker_is_admin(segment.user_id):
             await self._control_response(
                 "Only a server administrator can change music volume.",
@@ -4150,6 +4288,51 @@ class VoiceSession:
             return
         current = float(getattr(self, "_music_volume", self.settings.music_volume))
         updated = min(1.0, max(0.0, round(current + (0.2 * direction), 2)))
+        await self._apply_music_volume(
+            current,
+            updated,
+            segment,
+            transcript,
+            transcription_ms,
+        )
+
+    async def _handle_music_volume_level(
+        self,
+        percent: int,
+        segment: PcmSegment,
+        transcript: str,
+        transcription_ms: int,
+    ) -> None:
+        if not self._speaker_is_admin(segment.user_id):
+            await self._control_response(
+                "Only a server administrator can change music volume.",
+                segment.user_id,
+            )
+            return
+        if not 0 <= percent <= 100:
+            await self._control_response(
+                "Set music volume to a number from 0 through 100.",
+                segment.user_id,
+            )
+            return
+        current = float(getattr(self, "_music_volume", self.settings.music_volume))
+        await self._apply_music_volume(
+            current,
+            round(percent / 100, 2),
+            segment,
+            transcript,
+            transcription_ms,
+        )
+
+    async def _apply_music_volume(
+        self,
+        current: float,
+        updated: float,
+        segment: PcmSegment,
+        transcript: str,
+        transcription_ms: int,
+    ) -> None:
+        guild = self.voice_client.guild
         self._music_volume = updated
         source = getattr(self.voice_client, "source", None)
         if (

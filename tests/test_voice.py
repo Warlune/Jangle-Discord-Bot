@@ -45,6 +45,7 @@ from discord_ai.voice import (
     find_personality_choice,
     find_voice_choice,
     install_dave_voice_receive_patch,
+    is_impossible_repeated_wake_transcript,
     is_energy_easter_egg,
     is_nonverbal_interruption,
     is_admin_clear_queue_command,
@@ -58,6 +59,7 @@ from discord_ai.voice import (
     parse_music_query,
     parse_music_navigation,
     parse_music_volume_command,
+    parse_music_volume_level,
     parse_playlist_command,
     parse_personality_change_command,
     parse_speaker_listening_command,
@@ -264,13 +266,30 @@ def test_local_whisper_uses_single_pass_low_latency_decoding() -> None:
     assert captured["temperature"] == 0.0
     assert captured["condition_on_previous_text"] is False
     assert captured["without_timestamps"] is True
-    assert captured["hotwords"] == "Jangle, Hey Jangle, Jingle, Hey Jingle"
+    assert "hotwords" not in captured
     assert captured["vad_parameters"] == {
         "threshold": 0.35,
         "min_speech_duration_ms": 80,
         "min_silence_duration_ms": 200,
         "speech_pad_ms": 240,
     }
+
+
+def test_local_whisper_discards_impossible_repeated_wake_hallucination() -> None:
+    class FakeModel:
+        def transcribe(self, _audio: object, **_kwargs: object) -> tuple[list[object], object]:
+            return [SimpleNamespace(text=", ".join(["Hey Jengel"] * 45))], object()
+
+    whisper = object.__new__(LocalWhisper)
+    whisper.settings = SimpleNamespace(
+        whisper_language="en",
+        voice_wake_words=("jangle", "jengel"),
+    )
+    whisper._ensure_model = lambda: FakeModel()  # type: ignore[method-assign]
+
+    result = whisper._run_transcription(np.zeros(12_800, dtype=np.float32))
+
+    assert result == ""
 
 
 def test_audio_pacing_resets_instead_of_bursting_after_long_stall() -> None:
@@ -493,9 +512,26 @@ def test_wake_word_extracts_only_the_request() -> None:
     assert extract_wake_request("No! Hey Jangle, stop!", ("jangle",)) == "stop"
     assert extract_wake_request("Hey Django, are you there?", ("jangle",)) == "are you there"
     assert extract_wake_request("Hey Jungle, listen up", ("jangle",)) == "listen up"
+    assert extract_wake_request("Hey Jangle", ("jangle",)) == ""
     assert extract_wake_request("Hey Angela, listen up", ("jangle",)) is None
     assert extract_wake_request("Django is a web framework", ("jangle",)) is None
     assert extract_wake_request("This is ordinary conversation", ("jangle",)) is None
+
+
+def test_impossible_repeated_wake_transcripts_are_rejected_by_audio_duration() -> None:
+    repeated = ", ".join(["Hey Jengel"] * 45)
+
+    assert is_impossible_repeated_wake_transcript(repeated, ("jangle", "jengel"), 0.8)
+    assert not is_impossible_repeated_wake_transcript(
+        "Hey Jengel, Hey Jengel, Hey Jengel",
+        ("jangle", "jengel"),
+        2.0,
+    )
+    assert not is_impossible_repeated_wake_transcript(
+        "Hey Jangle, can you hear me",
+        ("jangle",),
+        1.0,
+    )
 
 
 def test_laughter_only_transcripts_are_nonverbal_interruptions() -> None:
@@ -798,6 +834,58 @@ def test_followup_window_is_limited_to_the_same_speaker() -> None:
     assert session._consume_followup(99) is None
     assert session._consume_followup(42) == state
     assert session._consume_followup(42) is None
+
+
+def test_wake_only_call_uses_short_acknowledgement_and_opens_one_reply() -> None:
+    events: list[str] = []
+
+    class FakeStt:
+        async def transcribe(self, _segment: PcmSegment) -> str:
+            return "Hey Jangle"
+
+    class FakeAnswers:
+        def record_event(self, event: str, **_fields: object) -> None:
+            events.append(event)
+
+        async def answer(self, *_args: object, **_kwargs: object) -> str:
+            raise AssertionError("A wake-only call must not invoke the model")
+
+    async def exercise() -> tuple[SpokenItem, FollowupState | None]:
+        session = object.__new__(VoiceSession)
+        session.stt = FakeStt()
+        session.answer_service = FakeAnswers()
+        session.settings = SimpleNamespace(
+            voice_wake_words=("jangle",),
+            voice_followup_seconds=25,
+        )
+        session.voice_client = SimpleNamespace(
+            guild=SimpleNamespace(id=7),
+            channel=SimpleNamespace(id=8),
+            is_playing=lambda: False,
+        )
+        session.text_echo = False
+        session.tts = object()
+        session.playback_queue = asyncio.Queue()
+        session._ignored_user_ids = set()
+        session._followups = {}
+        session._voice_choice_deadlines = {}
+        session._personality_choice_deadlines = {}
+        session._music_query_deadlines = {}
+        session._playlist_query_deadlines = {}
+        session._dj_mode = False
+        session._game_state = None
+        session._poll_state = None
+        session._story_state = None
+        session._award_state = None
+
+        await session._handle_segment(PcmSegment(42, "Speaker", b"pcm", 0.8))
+        return session.playback_queue.get_nowait(), session._followups.get(42)
+
+    spoken, followup = asyncio.run(exercise())
+
+    assert spoken.text == "Yeah?"
+    assert followup is not None and followup.remaining_turns == 1
+    assert events == ["voice_wake_acknowledged"]
 
 
 def test_complete_answer_cannot_open_a_turn_just_because_model_added_marker() -> None:
@@ -1263,6 +1351,11 @@ def test_voice_and_music_commands_are_parsed_without_hijacking_other_requests() 
     assert parse_dj_mode_command("DJ mode off") is False
     assert parse_music_pause_command("can you pause the music") == "pause"
     assert parse_music_pause_command("continue music") == "resume"
+    assert parse_music_volume_level("set volume 50") == 50
+    assert parse_music_volume_level("set the music volume to seventy five percent") == 75
+    assert parse_music_volume_level("volume 100%") == 100
+    assert parse_music_volume_level("set volume 125") == 125
+    assert parse_music_volume_level("volume up") is None
     assert parse_music_volume_command("volume up please") == 1
     assert parse_music_volume_command("turn it down") == -1
     assert is_admin_stop_command("Admin, stop the music") is True
@@ -2398,21 +2491,26 @@ def test_pause_resume_and_volume_change_active_music() -> None:
         await session._handle_music_pause("pause", segment, "pause", 30)
         assert session.voice_client.is_paused()
         await session._handle_music_volume(1, segment, "volume up", 30)
+        await session._handle_music_volume_level(37, segment, "set volume 37", 30)
+        await session._handle_music_volume_level(125, segment, "set volume 125", 30)
         await session._handle_music_pause("resume", segment, "resume", 30)
         return session.voice_client, session._music_volume
 
     voice_client, volume = asyncio.run(exercise())
 
     assert voice_client.is_paused() is False
-    assert volume == 0.65
-    assert voice_client.source.volume == 0.65
+    assert volume == 0.37
+    assert voice_client.source.volume == 0.37
     assert events == [
         "voice_music_pause_changed",
+        "voice_music_volume_changed",
         "voice_music_volume_changed",
         "voice_music_pause_changed",
     ]
     assert any("Music paused" in message for message in messages)
     assert any("Music volume 65 percent" in message for message in messages)
+    assert any("Music volume 37 percent" in message for message in messages)
+    assert any("number from 0 through 100" in message for message in messages)
 
 
 def test_admin_stop_terminates_paused_music() -> None:
