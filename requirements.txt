@@ -1,0 +1,7 @@
+discord.py[voice]>=2.6.4,<3
+discord-ext-voice-recv==0.5.2a179
+edge-tts>=7.2.8,<8
+faster-whisper>=1.2.1,<2
+numpy>=2.0,<3
+python-dotenv>=1.0,<2
+yt-dlp[default]>=2026.7.4
